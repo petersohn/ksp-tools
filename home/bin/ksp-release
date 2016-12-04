@@ -1,0 +1,103 @@
+#!/usr/bin/env python3
+
+import argparse
+import glob
+import json
+import os
+import sys
+from xml.etree import ElementTree
+import zipfile
+
+
+DEFAULT_VERSION = '0.1.0.0'
+CSPROJ_NAMESPACE = {
+    'ms': 'http://schemas.microsoft.com/developer/msbuild/2003'}
+
+
+def check_dir(directory):
+    if not os.path.isdir(directory):
+        raise NotADirectoryError(directory)
+    return os.path.abspath(directory)
+
+
+def calculate_version(directory):
+    version_files = glob.glob(
+        os.path.join(directory, '**', '*.version'), recursive=True)
+    if not version_files:
+        sys.stderr.write('No version files found. Returning default value.\n')
+        return DEFAULT_VERSION
+    with open(version_files[0], mode='r') as file:
+        version_info = json.load(file)
+    try:
+        version_node = version_info['VERSION']
+        return str.join('.', [
+            str(version_node['MAJOR']), str(version_node['MINOR']),
+            str(version_node.get('PATCH', 0)),
+            str(version_node.get('BUILD', 0))])
+    except KeyError:
+        sys.stderr.write('Bad version file. Returning default value.\n')
+        return DEFAULT_VERSION
+
+
+def archive_project(directory, archive):
+    os.chdir(directory)
+    for filename in glob.iglob('GameData/**', recursive=True):
+        if not os.path.isdir(filename):
+            archive.write(filename)
+    for filename in glob.iglob(
+            os.path.join(directory, '*.csproj')):
+        os.chdir(os.path.dirname(filename))
+        archive_csproject(filename, archive)
+
+
+def archive_csproject(filename, archive):
+    tree = ElementTree.parse(filename)
+    root = tree.getroot()
+    assemblyName = root.find(
+        'ms:PropertyGroup/ms:AssemblyName', CSPROJ_NAMESPACE)
+    if assemblyName is None:
+        sys.stderr.write(
+            filename + ': No assembly name found, not archiving.\n')
+        return
+    outputType = root.find(
+        'ms:PropertyGroup/ms:OutputType', CSPROJ_NAMESPACE)
+    if outputType is None or outputType.text != 'Library':
+        sys.stderr.write(filename + ': Not a library, not archiving.\n')
+        return
+
+    dll_name = assemblyName.text + '.dll'
+    archive.write(
+        os.path.join('bin', 'Release', dll_name),
+        os.path.join('GameData', assemblyName.text, dll_name))
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Make a KSP mod release.')
+    parser.add_argument('--output', '-o', action='store', type=str,
+                        help='The name of the output release. If omitted, it '
+                             'is calculated from the version file in the '
+                             'first project.')
+    parser.add_argument('--version', '-v', action='store', type=str,
+                        help='The version of the release. If omitted, it is '
+                             'calculated from the version file in the first '
+                             'project.')
+    parser.add_argument('projects', nargs='+', type=check_dir,
+                        help='The projects to include in the release.')
+    arguments = parser.parse_args()
+
+    if arguments.version:
+        version = arguments.version
+    else:
+        version = calculate_version(arguments.projects[0])
+    if arguments.output:
+        output = arguments.output
+    else:
+        output = os.path.basename(arguments.projects[0])
+
+    with zipfile.ZipFile(output + '-' + version + '.zip', mode='w') as archive:
+        for project in arguments.projects:
+            archive_project(project, archive)
+
+
+if __name__ == '__main__':
+    main()
